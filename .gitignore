@@ -1,0 +1,37 @@
+# Nothing is published unless it is explicitly un-ignored below. Build outputs, the
+# proprietary reference binaries (mgu-ref/), the sibling Android Auto tree (src/) and
+# the local secret never reach git by accident. tools/verify_repo.py re-checks every
+# pushed commit against .secrets/hu-password.txt.
+/*
+!/.gitignore
+!/.gitattributes
+!/.githooks/
+!/README.md
+!/LICENSE.md
+!/SECURITY.md
+!/huauth.py
+!/tools/
+!/rgd/
+!/persist/
+!/docs/
+!/deploy_sub.py
+!/cpconf.py
+!/snifflog.py
+!/kstock.py
+!/fdscan.py
+!/recover.py
+!/stab.py
+!/declog.py
+!/diag.py
+!/RUNBOOK-aa-oncar.md
+
+# Belt and braces: never commit these even if inside an allowed folder.
+/.secrets/
+/build/
+/mgu-ref/
+/src/
+*.o
+*.d
+*.so
+*.pyc
+__pycache__/
