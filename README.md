@@ -10,6 +10,11 @@ car's built-in navigation.
 > Status: working on a BMW G21 (B47) with EntryNav2 + DKOMBI2 and no head-up display. Direction + distance + street are
 > live from the phone and persist across reboots.
 
+![CarPlay maneuver arrow on the EntryNav2 instrument cluster](docs/media/cluster-demo.jpg)
+
+*The next-maneuver arrow with distance (40 m) and street name (просп. Энергетиков) shown on the cluster, while the
+CarPlay map runs on the centre screen. (A nearby car's number plate is blurred.)*
+
 ## How it works
 
 ```
