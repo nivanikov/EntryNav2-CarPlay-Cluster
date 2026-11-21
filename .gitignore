@@ -23,6 +23,8 @@
 !/stab.py
 !/declog.py
 !/diag.py
+!/stocknav_log.py
+!/drivelog.py
 !/RUNBOOK-aa-oncar.md
 
 # Belt and braces: never commit these even if inside an allowed folder.
