@@ -133,7 +133,10 @@ int rgd_parse_update(const uint8_t* params, size_t n, rg_update_t* out);
 int rgd_parse_maneuver(const uint8_t* params, size_t n, rg_maneuver_t* out);
 int rgd_parse_lane(const uint8_t* params, size_t n, rg_laneinfo_t* out);
 
-/* Apple maneuver type (0..53) + driving side + angle -> BMW cluster direction code (kombi.h table). */
-int rgd_maneuver_to_cluster_dir(uint8_t type, int angle, uint8_t side);
+/* Apple CPManeuverType (0..53) + driving side (0 = right-hand traffic, 1 = left-hand) -> Android Auto Maneuver.TYPE_*,
+ * the type space carplay-kombi's clusterDirection() actually expects. (carplay-kombi is built from the Android Auto
+ * project, so its table is Android Auto's, NOT Apple's -- the shim must translate.) For a roundabout EXIT the exit
+ * number (1..19) is written to *exit_out, else 0. The shim sends the returned value as the datagram T= field. */
+int rgd_apple_to_aa_type(uint8_t type, uint8_t side, int* exit_out);
 
 #endif

@@ -78,7 +78,7 @@ static void test_maneuver(void) {
     CHECK(m.dist_between == 120, "maneuver distance 120");
     CHECK(m.driving_side == 0, "maneuver side right");
     CHECK(m.exit_angle == 1000, "maneuver exit angle defaulted to 1000");
-    CHECK(rgd_maneuver_to_cluster_dir(m.type, 0, m.driving_side) == 7, "type 2 -> cluster kRight(7)");
+    { int e; CHECK(rgd_apple_to_aa_type(m.type, m.driving_side, &e) == 8, "apple RightTurn(2) -> AA turn-right(8)"); }
 }
 
 /* ---- 0x5201 update round-trip ---- */
@@ -150,16 +150,25 @@ static void test_malformed(void) {
     CHECK(1, "fuzz 20000 iterations without crash");
 }
 
-/* ---- maneuver -> cluster direction spot checks ---- */
+/* ---- Apple CPManeuverType -> Android Auto type spot checks (what carplay-kombi's clusterDirection expects).
+ * Each case is cross-checked against the symptoms seen on the car + the canonical CPManeuverType enum. ---- */
 static void test_dirmap(void) {
-    CHECK(rgd_maneuver_to_cluster_dir(1, 0, 0) == 6,  "type1 -> kLeft(6)");
-    CHECK(rgd_maneuver_to_cluster_dir(2, 0, 0) == 7,  "type2 -> kRight(7)");
-    CHECK(rgd_maneuver_to_cluster_dir(4, 0, 0) == 9,  "type4 side-right -> kUturnRight(9)");
-    CHECK(rgd_maneuver_to_cluster_dir(4, 0, 1) == 8,  "type4 side-left  -> kUturnLeft(8)");
-    CHECK(rgd_maneuver_to_cluster_dir(8, -5, 0) == 28, "type8 angle<0 -> kHwyOutLeft(28)");
-    CHECK(rgd_maneuver_to_cluster_dir(30, 0, 0) == 15, "type30 roundabout -> round");
-    CHECK(rgd_maneuver_to_cluster_dir(99, 0, 0) == 1, "unknown -> kStraight(1)");
-    CHECK(rgd_maneuver_to_cluster_dir(52, 0, 0) == 32, "type52 -> kLaneChangeLeft(32)");
+    int e;
+    CHECK(rgd_apple_to_aa_type(1, 0, &e) == 7,   "apple LeftTurn(1) -> AA turn-left(7)");
+    CHECK(rgd_apple_to_aa_type(2, 0, &e) == 8,   "apple RightTurn(2) -> AA turn-right(8)");
+    CHECK(rgd_apple_to_aa_type(4, 0, &e) == 11,  "apple UTurn(4) RHT -> AA uturn-left(11)");
+    CHECK(rgd_apple_to_aa_type(4, 1, &e) == 12,  "apple UTurn(4) LHT -> AA uturn-right(12)");
+    CHECK(rgd_apple_to_aa_type(12, 0, &e) == 39, "apple ArriveAtDestination(12) -> AA destination(39)");
+    CHECK(rgd_apple_to_aa_type(10, 0, &e) == 39, "apple ArriveEndOfNavigation(10) -> AA destination(39)");
+    CHECK(rgd_apple_to_aa_type(23, 0, &e) == 22, "apple HighwayOffRampRight(23) -> AA off-ramp-right(22)");
+    CHECK(rgd_apple_to_aa_type(8, 0, &e) == 22,  "apple OffRamp(8) RHT -> AA off-ramp-right(22)");
+    CHECK(rgd_apple_to_aa_type(9, 0, &e) == 13,  "apple OnRamp(9) RHT -> AA on-ramp-left(13)");
+    CHECK(rgd_apple_to_aa_type(49, 0, &e) == 5,  "apple SlightLeft(49) -> AA slight-left(5)");
+    CHECK(rgd_apple_to_aa_type(48, 0, &e) == 10, "apple SharpRight(48) -> AA sharp-right(10)");
+    CHECK(rgd_apple_to_aa_type(6, 0, &e) == 30,  "apple EnterRoundabout(6) RHT -> AA roundabout CCW(30)");
+    CHECK(rgd_apple_to_aa_type(30, 0, &e) == 45 && e == 3, "apple RoundaboutExit3(30) -> AA roundabout+exit 3");
+    CHECK(rgd_apple_to_aa_type(3, 0, &e) == 36,  "apple StraightAhead(3) -> AA straight(36)");
+    CHECK(rgd_apple_to_aa_type(99, 0, &e) == 36 && e == 0, "unknown -> AA straight(36), no exit");
 }
 
 /* ---- FF5A link frame: validate header + checksum against a REAL captured frame ---- */

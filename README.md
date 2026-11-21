@@ -41,7 +41,7 @@ Two parts:
 | key | meaning |
 |---|---|
 | `G` | guiding, `0`/`1` (1 = a route is active) |
-| `T` | raw Apple maneuver type `0..53` (the forwarder maps it to a cluster arrow) |
+| `T` | Android Auto maneuver type (the shim translates Apple `CPManeuverType` → this with `rgd_apple_to_aa_type`, since the forwarder's cluster table is Android Auto's; the forwarder then maps it to an arrow) |
 | `U` | display unit (`1` = metres, `3` = km, tenths) |
 | `M` | distance to the maneuver, in metres |
 | `D` | distance text to display (e.g. `300`, `1.2`) |

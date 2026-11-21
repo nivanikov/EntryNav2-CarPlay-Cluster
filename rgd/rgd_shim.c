@@ -186,14 +186,28 @@ static int narr_read(void* arr, const unsigned char** data, unsigned* len) {
 
 /* ============================ UDP forward to carplay-kombi ============================
  * carplay-kombi (carplay_main.cpp) binds 127.0.0.1:42042 and parseDatagram() reads ';'-separated single-letter KEYs:
- *   G=<guiding 0/1>  T=<RAW apple maneuver type 0..53>  U=<distance unit>  M=<distance value>  R=<road>  (D/C/E optional)
- * It does its OWN apple-type -> cluster Direction mapping (clusterDirection(m.type)), so T must be the RAW apple type,
- * NOT a pre-converted code. The maneuver TYPE comes from 0x5202 (rare) while the live DISTANCE countdown comes from
- * 0x5201 (frequent), so we cache the last maneuver and re-emit a COMPLETE datagram on every update (parseDatagram
- * replaces feed.man wholesale, so a distance-only datagram would drop the type). */
-static int     g_man_have = 0;
-static uint8_t g_man_type = 0;
-static char    g_man_road[RG_ROAD_MAX];
+ *   G=<guiding 0/1>  T=<maneuver type>  U=<distance unit>  M=<distance value>  D=<text>  R=<road>  E=<roundabout exit>
+ * carplay-kombi's clusterDirection() is the ANDROID AUTO maneuver table, so T must be an Android Auto Maneuver.TYPE_*
+ * (rgd_apple_to_aa_type() translates the Apple CPManeuverType for us), NOT the raw Apple code.
+ *
+ * The phone sends a 0x5202 per maneuver in the list (a burst on app-switch); the CURRENT one + the live distance come
+ * from 0x5201 (frequent). So we CACHE each 0x5202 by its index and DISPLAY the current maneuver -- the one 0x5201's
+ * ManeuverList points at -- with the live countdown. Displaying every 0x5202 is what made the cluster flicker through
+ * all upcoming turns and sit on a far "straight" maneuver. parseDatagram replaces feed.man wholesale, so each datagram
+ * is complete (type + distance + road). */
+#define MAN_SLOTS 32
+static rg_maneuver_t g_man_slot[MAN_SLOTS];
+static int  g_man_slot_idx[MAN_SLOTS];   /* actual maneuver index in each slot, -1 = empty */
+static int  g_man_slots_init = 0;
+static int  g_man_any = 0;               /* at least one maneuver cached */
+static int  g_man_cur = -1;              /* current maneuver index from the latest 0x5201 */
+static int  g_man_last = -1;             /* most recently cached index (fallback) */
+static void man_cache_init(void) { for (int i = 0; i < MAN_SLOTS; i++) g_man_slot_idx[i] = -1; g_man_slots_init = 1; }
+static const rg_maneuver_t* man_find(int idx) {
+    if (idx < 0) return 0;
+    int s = (int)(((unsigned)idx) % MAN_SLOTS);
+    return g_man_slot_idx[s] == idx ? &g_man_slot[s] : 0;
+}
 
 /* Replicate carplay-kombi metric() (kombi_display.cpp): >= ~1000 m -> "X.X" km (unit kUnitKilometresTenths=3);
  * else metres rounded down (10 m step under 100, 50 m above), min 10 (unit kUnitMetres=1). carplay-kombi DISPLAYS the
@@ -218,31 +232,50 @@ static void dump_tlvs(const char* tag, const uint8_t* p, size_t n) {
     }
 }
 
-static void send_feed(int guiding, int type, long metres, const char* road) {
+static void send_feed(int guiding, int type, long metres, const char* road, int exit) {
     if (!opt("CP_FORWARD", 0)) return;
     if (g_udp < 0) { g_udp = socket(AF_INET, SOCK_DGRAM, 0); if (g_udp < 0) return; }
     char dtext[16]; int unit; fmt_metric(metres, dtext, sizeof(dtext), &unit);
     char msg[320];
     int n = snprintf(msg, sizeof(msg), "G=%d;T=%d;U=%d;M=%ld;D=%s;R=%s",
                      guiding ? 1 : 0, type, unit, metres, dtext, road ? road : "");
+    if (exit > 0 && n > 0 && n < (int)sizeof(msg))
+        n += snprintf(msg + n, sizeof(msg) - (size_t)n, ";E=%d", exit);
     struct sockaddr_in a; memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)cfg_int("CP_UDP_PORT", 42042));
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sendto(g_udp, msg, (size_t)n, 0, (struct sockaddr*)&a, sizeof(a));
     if (opt("CP_FWD_LOG", 0)) shim_log("FWD %.*s", n, msg);
 }
-/* 0x5202: new maneuver -> cache type + road (the road turned ONTO; the maneuver description as fallback) and emit. */
-static void forward_maneuver(const rg_maneuver_t* m) {
-    const char* road = m->after_road[0] ? m->after_road : m->desc;
-    g_man_have = 1; g_man_type = m->type;
-    strncpy(g_man_road, road, sizeof(g_man_road) - 1); g_man_road[sizeof(g_man_road) - 1] = 0;
-    send_feed(1, m->type, (long)m->dist_between, road);
+/* Translate a cached Apple maneuver to its Android Auto type (+ roundabout exit) and emit a complete datagram. */
+static void emit_maneuver(const rg_maneuver_t* m, long metres, const char* road) {
+    int exit = 0;
+    int aa = rgd_apple_to_aa_type(m->type, m->driving_side, &exit);
+    send_feed(1, aa, metres, road, exit);
+    if (opt("CP_FWD_LOG", 0))
+        shim_log("MAP idx=%u apple=%u side=%u -> aa=%d exit=%d", m->index, m->type, m->driving_side, aa, exit);
 }
-/* 0x5201: distance update -> re-emit the cached maneuver with the live distance (keeps type + road, counts down). */
+/* 0x5202: cache the maneuver by its index. Display it only if it is the CURRENT maneuver (the index 0x5201 points at)
+ * or we have no current one yet -- so a burst of upcoming maneuvers does not flicker across the cluster. */
+static void forward_maneuver(const rg_maneuver_t* m) {
+    if (!g_man_slots_init) man_cache_init();
+    int s = (int)(((unsigned)m->index) % MAN_SLOTS);
+    g_man_slot[s] = *m; g_man_slot_idx[s] = (int)m->index;
+    g_man_last = (int)m->index; g_man_any = 1;
+    if ((int)m->index == g_man_cur || g_man_cur < 0) {
+        const char* road = m->after_road[0] ? m->after_road : m->desc;
+        emit_maneuver(m, (long)m->dist_between, road);
+    }
+}
+/* 0x5201: live distance update -> show the CURRENT maneuver (the one the ManeuverList points at) counting down. */
 static void forward_update(const rg_update_t* u) {
-    if (!g_man_have) return;
-    const char* road = u->road[0] ? u->road : g_man_road;
-    send_feed(1, g_man_type, (long)u->dist_to_maneuver, road);
+    if (!g_man_any) return;
+    g_man_cur = (int)u->cur_maneuver_idx;
+    const rg_maneuver_t* m = man_find(g_man_cur);
+    if (!m) m = man_find(g_man_last);   /* fallback: newest cached maneuver */
+    if (!m) return;
+    const char* road = u->road[0] ? u->road : (m->after_road[0] ? m->after_road : m->desc);
+    emit_maneuver(m, (long)u->dist_to_maneuver, road);
 }
 
 /* ============================ native subscribe: responder + crash guard ============================

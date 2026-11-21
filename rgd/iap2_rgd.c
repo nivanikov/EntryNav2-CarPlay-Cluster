@@ -223,33 +223,54 @@ int rgd_parse_lane(const uint8_t* p, size_t n, rg_laneinfo_t* out) {
     return walked;
 }
 
-/* ---------- Apple maneuver type -> BMW cluster direction (NBT rgkombi kombi.h table) ---------- */
-enum { kStraight=1,kHalfLeft=2,kHalfRight=3,kTightLeft=4,kTightRight=5,kLeft=6,kRight=7,
-       kUturnLeft=8,kUturnRight=9,kDestination=10,kRoundaboutCw=14,kRoundaboutCcw=15,
-       kHwyInLeft=25,kHwyInRight=26,kHwyOutLeft=28,kHwyOutRight=29,kLaneChangeLeft=32,kLaneChangeRight=33 };
-int rgd_maneuver_to_cluster_dir(uint8_t type, int angle, uint8_t side) {
+/* ---------- Apple CPManeuverType -> Android Auto Maneuver.TYPE_* ----------
+ * carplay-kombi's clusterDirection() is the ANDROID AUTO maneuver-type table (the forwarder is built from the Android
+ * Auto project), so feeding it a raw Apple type mis-maps almost everything (e.g. Apple 12 ArriveAtDestination would be
+ * read as AA 12 = U-turn-right). Translate here so the shim emits an AA type the forwarder renders correctly.
+ * Side: 0 = right-hand traffic (RHT), 1 = left-hand (LHT). U-turns curve toward the oncoming side (RHT -> left);
+ * roundabouts circulate counter-clockwise in RHT; a generic off-ramp leaves toward the driving side, a generic on-ramp
+ * merges toward the opposite side. */
+enum {  /* androidx.car.app.navigation.model.Maneuver.TYPE_* */
+    AA_STRAIGHT=36, AA_DEPART=1, AA_FERRY=37,
+    AA_KEEP_LEFT=3, AA_KEEP_RIGHT=4, AA_SLIGHT_LEFT=5, AA_SLIGHT_RIGHT=6,
+    AA_TURN_LEFT=7, AA_TURN_RIGHT=8, AA_SHARP_LEFT=9, AA_SHARP_RIGHT=10,
+    AA_UTURN_LEFT=11, AA_UTURN_RIGHT=12,
+    AA_ON_RAMP_LEFT=13, AA_ON_RAMP_RIGHT=14, AA_OFF_RAMP_LEFT=21, AA_OFF_RAMP_RIGHT=22,
+    AA_MERGE_LEFT=27, AA_MERGE_RIGHT=28,
+    AA_ROUNDABOUT_CCW=30, AA_ROUNDABOUT_CW=32, AA_ROUNDABOUT_EXIT_CW=43, AA_ROUNDABOUT_EXIT_CCW=45,
+    AA_DESTINATION=39, AA_DESTINATION_LEFT=41, AA_DESTINATION_RIGHT=42
+};
+int rgd_apple_to_aa_type(uint8_t type, uint8_t side, int* exit_out) {
     int lht = (side == 1);
-    int uturn = lht ? kUturnLeft : kUturnRight;
-    int round = lht ? kRoundaboutCw : kRoundaboutCcw;
-    int rampLeft = (angle != 0) ? (angle < 0) : lht;
+    if (exit_out) *exit_out = 0;
+    if (type >= 28 && type <= 46) {                 /* RoundaboutExit1..19 */
+        if (exit_out) *exit_out = (int)type - 27;
+        return lht ? AA_ROUNDABOUT_EXIT_CW : AA_ROUNDABOUT_EXIT_CCW;
+    }
     switch (type) {
-        case 1: case 20: return kLeft;
-        case 2: case 21: return kRight;
-        case 4: case 18: case 26: return uturn;
-        case 6: case 7: case 19: return round;
-        case 8: return rampLeft ? kHwyOutLeft : kHwyOutRight;
-        case 9: return rampLeft ? kHwyInLeft : kHwyInRight;
-        case 10: case 12: case 24: case 25: case 27: return kDestination;
-        case 13: case 49: return kHalfLeft;
-        case 14: case 50: return kHalfRight;
-        case 22: return kHwyOutLeft;
-        case 23: return kHwyOutRight;
-        case 47: return kTightLeft;
-        case 48: return kTightRight;
-        case 52: return kLaneChangeLeft;
-        case 53: return kLaneChangeRight;
-        default:
-            if (type >= 28 && type <= 46) return round;   /* roundabout exit n = type-27 */
-            return kStraight;                             /* 0,3,5,11,15-17, unknown */
+        case 1:  case 20: return AA_TURN_LEFT;      /* LeftTurn / LeftTurnAtEnd */
+        case 2:  case 21: return AA_TURN_RIGHT;     /* RightTurn / RightTurnAtEnd */
+        case 47: return AA_SHARP_LEFT;              /* SharpLeftTurn */
+        case 48: return AA_SHARP_RIGHT;             /* SharpRightTurn */
+        case 49: return AA_SLIGHT_LEFT;             /* SlightLeftTurn */
+        case 50: return AA_SLIGHT_RIGHT;            /* SlightRightTurn */
+        case 13: return AA_KEEP_LEFT;               /* KeepLeft */
+        case 14: return AA_KEEP_RIGHT;              /* KeepRight */
+        case 4: case 18: case 26:                   /* UTurn family: toward oncoming side */
+            return lht ? AA_UTURN_RIGHT : AA_UTURN_LEFT;
+        case 6: case 7: case 19:                    /* Enter/Exit roundabout, U-turn at roundabout */
+            return lht ? AA_ROUNDABOUT_CW : AA_ROUNDABOUT_CCW;
+        case 8:  return lht ? AA_OFF_RAMP_LEFT : AA_OFF_RAMP_RIGHT;  /* OffRamp: toward driving side */
+        case 22: return AA_OFF_RAMP_LEFT;           /* HighwayOffRampLeft */
+        case 23: return AA_OFF_RAMP_RIGHT;          /* HighwayOffRampRight */
+        case 9:  return lht ? AA_ON_RAMP_RIGHT : AA_ON_RAMP_LEFT;    /* OnRamp: merge toward opposite side */
+        case 52: return AA_MERGE_LEFT;              /* ChangeHighwayLeft */
+        case 53: return AA_MERGE_RIGHT;             /* ChangeHighwayRight */
+        case 10: case 12: case 27: return AA_DESTINATION;  /* ArriveEndOfNav / ArriveAtDestination / ArriveEndOfDirs */
+        case 24: return AA_DESTINATION_LEFT;        /* ArriveAtDestinationLeft */
+        case 25: return AA_DESTINATION_RIGHT;       /* ArriveAtDestinationRight */
+        case 11: return AA_DEPART;                  /* StartRoute */
+        case 15: case 16: case 17: return AA_FERRY; /* ferries */
+        default: return AA_STRAIGHT;                /* 0 NoTurn, 3 Straight, 5 FollowRoad, 51 ChangeHighway, unknown */
     }
 }
