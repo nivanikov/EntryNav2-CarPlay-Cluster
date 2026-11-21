@@ -15,7 +15,7 @@ writes the pcap to /var/local.
 
   python stocknav_log.py --probe          # interfaces, which capture tool is available, a short peek at cluster traffic
   python stocknav_log.py --start          # start a background capture on the HU, print the PID
-  python stocknav_log.py --stop           # stop it and pull the pcap here (stocknav-<ts>.pcap)
+  python stocknav_log.py --stop [label]   # stop + pull here as stocknav-<label>-<ts>.pcap (label e.g. before / after)
 
 Env: HU_HOST (ENET addr), HU_PW/.secrets (password), CP_KOMBI_ADDR (cluster host, default 160.48.199.96).
 """
@@ -139,7 +139,8 @@ def main():
         if arg == "--stop":
             run(c, "P=$(cat %s 2>/dev/null); [ -n \"$P\" ] && kill $P 2>/dev/null; sleep 1; sync" % REMOTE_PID)
             print("stopped;", asc(run(c, "ls -l %s 2>/dev/null; tail -1 /var/local/stocknav.cap.out 2>/dev/null" % REMOTE_PCAP).strip()))
-            local = "stocknav-%s.pcap" % time.strftime("%Y%m%d-%H%M%S")
+            label = (sys.argv[2] + "-") if len(sys.argv) > 2 and sys.argv[2] else ""
+            local = "stocknav-%s%s.pcap" % (label, time.strftime("%Y%m%d-%H%M%S"))
             try:
                 sf = c.open_sftp(); sf.get(REMOTE_PCAP, local); sf.close()
                 print("pulled ->", os.path.abspath(local), "-- open in Wireshark, filter 'someip', host", CLUSTER)
