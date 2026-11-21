@@ -9,9 +9,11 @@ pcap you open in Wireshark (it has a SOME/IP dissector) to see the stock guidanc
 the stock-style arrow/map from CarPlay later.
 
 Capture it with the FACTORY nav guiding and NO CarPlay route active (so only the stock source is talking to the
-cluster). Needs tcpdump on the HU; --probe tells you whether it is there.
+cluster). Uses the head unit's tcpdump if present; otherwise it uploads our static pcapdump (build/pcapdump) to the
+exec partition /opt/app/cisu and captures with that. /var/local is noexec, so the tool runs from /opt/app/cisu and
+writes the pcap to /var/local.
 
-  python stocknav_log.py --probe          # interfaces, tcpdump presence, a 5 s peek at cluster traffic
+  python stocknav_log.py --probe          # interfaces, which capture tool is available, a short peek at cluster traffic
   python stocknav_log.py --start          # start a background capture on the HU, print the PID
   python stocknav_log.py --stop           # stop it and pull the pcap here (stocknav-<ts>.pcap)
 
@@ -27,8 +29,11 @@ from huauth import USER, hu_password
 
 HOST = os.environ.get("HU_HOST", "169.254.1.0")
 CLUSTER = os.environ.get("CP_KOMBI_ADDR", "160.48.199.96")
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOCAL_PCAPDUMP = os.path.join(HERE, "build", "pcapdump")
+REMOTE_PCAPDUMP = "/opt/app/cisu/pcapdump"   # exec partition (/var/local is noexec)
 REMOTE_PCAP = "/var/local/stocknav.pcap"
-REMOTE_PID = "/var/local/stocknav.tcpdump.pid"
+REMOTE_PID = "/var/local/stocknav.cap.pid"
 TCPDUMP_CANDIDATES = ["tcpdump", "/usr/sbin/tcpdump", "/usr/bin/tcpdump", "/sbin/tcpdump", "/opt/app/usr/bin/tcpdump"]
 
 
@@ -56,19 +61,38 @@ def find_tcpdump(c):
     return ""
 
 
+def ensure_pcapdump(c):
+    """Return the remote pcapdump path, uploading build/pcapdump to /opt/app/cisu if it is not already there."""
+    if run(c, "[ -x %s ] && echo yes" % REMOTE_PCAPDUMP).strip() == "yes":
+        return REMOTE_PCAPDUMP
+    if not os.path.exists(LOCAL_PCAPDUMP):
+        print("MISSING local build/pcapdump -- build it first (arm ... -static pcapdump.c -o build/pcapdump)."); return ""
+    run(c, "mkdir -p /opt/app/cisu")
+    sf = c.open_sftp(); sf.put(LOCAL_PCAPDUMP, REMOTE_PCAPDUMP); sf.chmod(REMOTE_PCAPDUMP, 0o755); sf.close()
+    print("uploaded pcapdump ->", REMOTE_PCAPDUMP)
+    return REMOTE_PCAPDUMP
+
+
+def capture_tool(c):
+    """(kind, path): prefer the HU's tcpdump, else our uploaded pcapdump."""
+    td = find_tcpdump(c)
+    if td:
+        return "tcpdump", td
+    pd = ensure_pcapdump(c)
+    return ("pcapdump", pd) if pd else ("", "")
+
+
 def iface_for_cluster(c):
-    # the interface whose subnet matches the cluster (160.48.199.x by default)
     net = ".".join(CLUSTER.split(".")[:3]) + "."
     out = run(c, "ip -o -4 addr show 2>/dev/null | awk '{print $2, $4}'")
     for line in out.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[1].startswith(net):
-            return parts[0]
-    # fallback: any non-loopback iface
+        p = line.split()
+        if len(p) == 2 and p[1].startswith(net):
+            return p[0]
     for line in out.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and not parts[1].startswith("127."):
-            return parts[0]
+        p = line.split()
+        if len(p) == 2 and not p[1].startswith("127."):
+            return p[0]
     return ""
 
 
@@ -79,36 +103,46 @@ def main():
     except Exception as e:
         print("NO-CONNECT (HU unreachable):", asc(e)); sys.exit(1)
     try:
-        td = find_tcpdump(c)
         iface = iface_for_cluster(c)
         if arg == "--probe":
             print("=== interfaces ==="); print(asc(run(c, "ip -o -4 addr show 2>/dev/null | awk '{print $2, $4}'")))
             print("cluster host:", CLUSTER, "| matched iface:", iface or "(none)")
-            print("tcpdump:", td or "NOT FOUND -- need a static ARM tcpdump uploaded to /var/local (ask me to build one)")
-            if td and iface:
-                print("=== 5 s peek at traffic to/from the cluster (counts) ===")
-                print(asc(run(c, "timeout 5 %s -nn -i %s -c 40 host %s 2>&1 | tail -20" % (td, iface, CLUSTER), t=20)))
-            return
-        if not td:
-            print("tcpdump NOT on the HU -- cannot capture. Ask me to cross-build a static ARM tcpdump for /var/local.")
+            td = find_tcpdump(c)
+            has_pd = run(c, "[ -x %s ] && echo yes" % REMOTE_PCAPDUMP).strip() == "yes"
+            print("tcpdump on HU:", td or "no", "| pcapdump uploaded:", "yes" if has_pd else "no",
+                  "| local build/pcapdump:", "yes" if os.path.exists(LOCAL_PCAPDUMP) else "no")
+            if iface:
+                kind, path = capture_tool(c)
+                if kind == "tcpdump":
+                    print("=== 5 s peek (tcpdump) ===")
+                    print(asc(run(c, "timeout 5 %s -nn -i %s -c 40 host %s 2>&1 | tail -15" % (path, iface, CLUSTER), t=20)))
+                elif kind == "pcapdump":
+                    print("=== 5 s peek (pcapdump, max 50 pkts) ===")
+                    print(asc(run(c, "timeout 6 %s %s /var/local/peek.pcap %s 50 2>&1 | tail -3; rm -f /var/local/peek.pcap"
+                                     % (path, iface, CLUSTER), t=12)))
             return
         if not iface:
             print("no interface on the cluster subnet found; run --probe."); return
         if arg == "--start":
-            cmd = ("nohup %s -nn -i %s -s 0 -w %s host %s >/var/local/stocknav.tcpdump.out 2>&1 & echo $! > %s; cat %s"
-                   % (td, iface, REMOTE_PCAP, CLUSTER, REMOTE_PID, REMOTE_PID))
-            pid = run(c, cmd).strip()
-            print("started tcpdump pid=%s on %s capturing host %s -> %s" % (pid, iface, CLUSTER, REMOTE_PCAP))
-            print("Now drive with the FACTORY nav guiding (no CarPlay route). Then run: python stocknav_log.py --stop")
+            kind, path = capture_tool(c)
+            if not kind:
+                print("no capture tool (no tcpdump and no pcapdump); build build/pcapdump first."); return
+            if kind == "tcpdump":
+                cmd = "%s -nn -i %s -s 0 -w %s host %s" % (path, iface, REMOTE_PCAP, CLUSTER)
+            else:
+                cmd = "%s %s %s %s" % (path, iface, REMOTE_PCAP, CLUSTER)
+            pid = run(c, "nohup %s >/var/local/stocknav.cap.out 2>&1 & echo $! > %s; cat %s"
+                         % (cmd, REMOTE_PID, REMOTE_PID)).strip()
+            print("started %s pid=%s on %s capturing host %s -> %s" % (kind, pid, iface, CLUSTER, REMOTE_PCAP))
+            print("Now drive with the FACTORY nav guiding (no CarPlay route). Then: python stocknav_log.py --stop")
             return
         if arg == "--stop":
             run(c, "P=$(cat %s 2>/dev/null); [ -n \"$P\" ] && kill $P 2>/dev/null; sleep 1; sync" % REMOTE_PID)
-            sz = run(c, "ls -l %s 2>/dev/null" % REMOTE_PCAP).strip()
-            print("stopped;", asc(sz) or "(no pcap?)")
+            print("stopped;", asc(run(c, "ls -l %s 2>/dev/null; tail -1 /var/local/stocknav.cap.out 2>/dev/null" % REMOTE_PCAP).strip()))
             local = "stocknav-%s.pcap" % time.strftime("%Y%m%d-%H%M%S")
             try:
                 sf = c.open_sftp(); sf.get(REMOTE_PCAP, local); sf.close()
-                print("pulled ->", os.path.abspath(local), "-- open in Wireshark, filter 'someip', look at host", CLUSTER)
+                print("pulled ->", os.path.abspath(local), "-- open in Wireshark, filter 'someip', host", CLUSTER)
             except Exception as e:
                 print("pull failed:", asc(e))
             return
