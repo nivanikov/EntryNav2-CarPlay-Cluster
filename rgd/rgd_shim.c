@@ -268,7 +268,7 @@ static void dump_tlvs(const char* tag, const uint8_t* p, size_t n) {
     }
 }
 
-static void send_feed(int guiding, int type, long metres, const char* road, int exit, const char* lanes) {
+static void send_feed(int guiding, int type, long metres, const char* road, int exit, const char* lanes, int next_type) {
     if (!opt("CP_FORWARD", 0)) return;
     if (g_udp < 0) { g_udp = socket(AF_INET, SOCK_DGRAM, 0); if (g_udp < 0) return; }
     char dtext[16]; int unit; fmt_metric(metres, dtext, sizeof(dtext), &unit);
@@ -279,22 +279,25 @@ static void send_feed(int guiding, int type, long metres, const char* road, int 
         n += snprintf(msg + n, sizeof(msg) - (size_t)n, ";E=%d", exit);
     if (lanes && lanes[0] && n > 0 && n < (int)sizeof(msg))
         n += snprintf(msg + n, sizeof(msg) - (size_t)n, ";L=%s", lanes);
+    if (next_type >= 0 && n > 0 && n < (int)sizeof(msg))
+        n += snprintf(msg + n, sizeof(msg) - (size_t)n, ";N=%d", next_type);   /* the "then..." maneuver */
     struct sockaddr_in a; memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)cfg_int("CP_UDP_PORT", 42042));
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sendto(g_udp, msg, (size_t)n, 0, (struct sockaddr*)&a, sizeof(a));
     if (opt("CP_FWD_LOG", 0)) shim_log("FWD %.*s", n, msg);
 }
-/* Translate a cached Apple maneuver to its Android Auto type (+ roundabout exit) and emit a complete datagram. */
-static void emit_maneuver(const rg_maneuver_t* m, long metres, const char* road) {
+/* Translate a cached Apple maneuver to its Android Auto type (+ roundabout exit), attach the "then..." maneuver's AA
+ * type (next_aa, or -1 for none), and emit a complete datagram. */
+static void emit_maneuver(const rg_maneuver_t* m, long metres, const char* road, int next_aa) {
     int exit = 0;
     int aa = rgd_apple_to_aa_type(m->type, m->driving_side, &exit);
     char lanes[128]; lanes[0] = 0;
     if (g_lanes_have && (g_lanes_idx == (int)m->index || g_lanes_idx < 0)) build_lane_str(lanes, sizeof(lanes));
-    send_feed(1, aa, metres, road, exit, lanes[0] ? lanes : 0);
+    send_feed(1, aa, metres, road, exit, lanes[0] ? lanes : 0, next_aa);
     if (opt("CP_FWD_LOG", 0))
-        shim_log("MAP idx=%u apple=%u side=%u -> aa=%d exit=%d lanes='%s'(laneIdx=%d)",
-                 m->index, m->type, m->driving_side, aa, exit, lanes, g_lanes_idx);
+        shim_log("MAP idx=%u apple=%u side=%u -> aa=%d exit=%d next_aa=%d lanes='%s'(laneIdx=%d)",
+                 m->index, m->type, m->driving_side, aa, exit, next_aa, lanes, g_lanes_idx);
 }
 /* 0x5202: cache the maneuver by its index. Display it only if it is the CURRENT maneuver (the index 0x5201 points at)
  * or we have no current one yet -- so a burst of upcoming maneuvers does not flicker across the cluster. */
@@ -305,14 +308,15 @@ static void forward_maneuver(const rg_maneuver_t* m) {
     g_man_last = (int)m->index; g_man_any = 1;
     if ((int)m->index == g_man_cur || g_man_cur < 0) {
         const char* road = m->after_road[0] ? m->after_road : m->desc;
-        emit_maneuver(m, (long)m->dist_between, road);
+        emit_maneuver(m, (long)m->dist_between, road, -1);
     }
 }
-/* 0x5201: live distance update -> show the CURRENT maneuver (the one the ManeuverList points at) counting down. */
+/* 0x5201: live distance update -> show the CURRENT maneuver (the one the ManeuverList points at) counting down, plus
+ * the "then..." maneuver (the next one in the list) as the cluster's secondary arrow. */
 static void forward_update(const rg_update_t* u) {
     if (u->route_state == 0) {   /* RouteGuidanceState 0 = guidance stopped: clear the arrow, don't show a stale/first
                                    * maneuver (otherwise the cluster drew maneuver 0 -- a U-turn -- after the route ended) */
-        send_feed(0, 1, 0, "", 0, 0);
+        send_feed(0, 1, 0, "", 0, 0, -1);
         return;
     }
     if (!g_man_any) return;
@@ -320,14 +324,14 @@ static void forward_update(const rg_update_t* u) {
     const rg_maneuver_t* m = man_find(g_man_cur);
     if (!m) m = man_find(g_man_last);   /* fallback: newest cached maneuver */
     if (!m) return;
+    int next_aa = -1;
+    const rg_maneuver_t* nx = man_find(g_man_cur + 1);   /* the "then..." maneuver */
+    if (nx) { int e2; next_aa = rgd_apple_to_aa_type(nx->type, nx->driving_side, &e2); }
     const char* road = u->road[0] ? u->road : (m->after_road[0] ? m->after_road : m->desc);
-    emit_maneuver(m, (long)u->dist_to_maneuver, road);
-    if (opt("CP_FWD_LOG", 0)) {   /* the "then..." maneuver: data only for now (not yet rendered on the cluster) */
-        const rg_maneuver_t* nx = man_find(g_man_cur + 1);
-        if (nx) { int e2; int aa2 = rgd_apple_to_aa_type(nx->type, nx->driving_side, &e2);
-                  shim_log("NEXT idx=%u apple=%u -> aa=%d road='%s'", nx->index, nx->type, aa2,
-                           nx->after_road[0] ? nx->after_road : nx->desc); }
-    }
+    emit_maneuver(m, (long)u->dist_to_maneuver, road, next_aa);
+    if (nx && opt("CP_FWD_LOG", 0))
+        shim_log("NEXT idx=%u apple=%u -> aa=%d road='%s'", nx->index, nx->type, next_aa,
+                 nx->after_road[0] ? nx->after_road : nx->desc);
 }
 
 /* 0x5204: cache the lane set (keyed by its maneuver index) and log the raw per-lane fields so the angle->shape mapping
