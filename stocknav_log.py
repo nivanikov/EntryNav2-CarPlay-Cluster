@@ -107,7 +107,7 @@ def main():
     except Exception as e:
         print("NO-CONNECT (HU unreachable):", asc(e)); sys.exit(1)
     try:
-        iface = iface_for_cluster(c)
+        iface = os.environ.get("CP_CAP_IFACE") or iface_for_cluster(c)   # override to capture a parent iface / all VLANs
         if arg == "--probe":
             print("=== interfaces ==="); print(asc(run(c, "ip -o -4 addr show 2>/dev/null | awk '{print $2, $4}'")))
             print("cluster host:", CLUSTER, "| matched iface:", iface or "(none)")
@@ -129,7 +129,8 @@ def main():
             return
         if not iface:
             print("no interface on the cluster subnet found; run --probe."); return
-        if arg == "--start":
+        if arg in ("--start", "--start-all"):
+            allf = (arg == "--start-all")   # --start-all: no host filter (find where guidance really flows)
             kind, path = capture_tool(c)
             if not kind:
                 print("no capture tool (no tcpdump and no pcapdump); build build/pcapdump first."); return
@@ -138,9 +139,10 @@ def main():
                    "rm -f %s %s /var/local/stocknav.cap.out; sleep 1" % (REMOTE_PCAP, REMOTE_PID))
             if kind == "pcapdump":
                 # pcapdump -d self-daemonizes and writes <out>.pid (the HU has no setsid; nohup alone does not survive).
-                run(c, "%s -d %s %s %s" % (path, iface, REMOTE_PCAP, CLUSTER))
+                run(c, "%s -d %s %s %s" % (path, iface, REMOTE_PCAP, "" if allf else CLUSTER))
             else:
-                cmd = "%s -nn -i %s -s 0 -w %s host %s" % (path, iface, REMOTE_PCAP, CLUSTER)
+                flt = "" if allf else ("host %s" % CLUSTER)
+                cmd = "%s -nn -i %s -s 0 -w %s %s" % (path, iface, REMOTE_PCAP, flt)
                 run(c, "nohup %s </dev/null >/var/local/stocknav.cap.out 2>&1 & echo $! > %s" % (cmd, REMOTE_PID))
             time.sleep(1)
             pid = run(c, "cat %s 2>/dev/null" % REMOTE_PID).strip()
@@ -163,6 +165,37 @@ def main():
             try:
                 sf = c.open_sftp(); sf.get(REMOTE_PCAP, local); sf.close()
                 print("pulled ->", os.path.abspath(local), "-- open in Wireshark, filter 'someip', host", CLUSTER)
+            except Exception as e:
+                print("pull failed:", asc(e))
+            return
+        if arg == "--capture":
+            # Foreground, time-boxed capture that keeps the SSH connection OPEN for the whole window, so the process
+            # stays alive (this HU has no working setsid/nohup detach -- a backgrounded capture dies on channel close).
+            # Unfiltered on the chosen iface (CP_CAP_IFACE, e.g. vbr0) to catch guidance wherever it flows.
+            secs = 180
+            label = ""
+            for a in sys.argv[2:]:
+                if a.isdigit():
+                    secs = int(a)
+                else:
+                    label = a
+            kind, path = capture_tool(c)
+            if not kind:
+                print("no capture tool."); return
+            run(c, "for p in $(ps w 2>/dev/null | grep '[p]capdump' | awk '{print $1}'); do kill $p 2>/dev/null; done; "
+                   "rm -f %s /var/local/stocknav.cap.out; sleep 1" % REMOTE_PCAP)
+            if kind == "pcapdump":
+                cmd = "timeout -t %d %s %s %s" % (secs, path, iface, REMOTE_PCAP)
+            else:
+                cmd = "timeout -t %d %s -nn -i %s -s 0 -w %s" % (secs, path, iface, REMOTE_PCAP)
+            print("capturing %d s on %s -- DRIVE NOW with maneuvers (roundabout, turns, U-turns)..." % (secs, iface))
+            out = run(c, cmd, t=secs + 40)
+            print("capture finished:", asc(out.strip())[-180:])
+            print("file:", asc(run(c, "ls -l %s 2>&1" % REMOTE_PCAP).strip()))
+            local = "stocknav-%s%s.pcap" % ((label + "-") if label else "", time.strftime("%Y%m%d-%H%M%S"))
+            try:
+                sf = c.open_sftp(); sf.get(REMOTE_PCAP, local); sf.close()
+                print("pulled ->", os.path.abspath(local))
             except Exception as e:
                 print("pull failed:", asc(e))
             return
