@@ -310,6 +310,11 @@ static void forward_maneuver(const rg_maneuver_t* m) {
 }
 /* 0x5201: live distance update -> show the CURRENT maneuver (the one the ManeuverList points at) counting down. */
 static void forward_update(const rg_update_t* u) {
+    if (u->route_state == 0) {   /* RouteGuidanceState 0 = guidance stopped: clear the arrow, don't show a stale/first
+                                   * maneuver (otherwise the cluster drew maneuver 0 -- a U-turn -- after the route ended) */
+        send_feed(0, 1, 0, "", 0, 0);
+        return;
+    }
     if (!g_man_any) return;
     g_man_cur = (int)u->cur_maneuver_idx;
     const rg_maneuver_t* m = man_find(g_man_cur);
