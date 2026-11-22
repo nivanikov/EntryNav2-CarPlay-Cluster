@@ -12,8 +12,8 @@ car's built-in navigation.
 
 ![CarPlay maneuver arrow on the EntryNav2 instrument cluster](docs/media/cluster-demo.jpg)
 
-*The next-maneuver arrow with distance (40 m) and street name (просп. Энергетиков) shown on the cluster, while the
-CarPlay map runs on the centre screen. (A nearby car's number plate is blurred.)*
+*A roundabout maneuver — "Съезд 2 - Центральный бул." at 150 m — on the instrument cluster, driven live from the
+iPhone, with the CarPlay map on the centre screen.*
 
 ## How it works
 
