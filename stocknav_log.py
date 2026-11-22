@@ -33,7 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LOCAL_PCAPDUMP = os.path.join(HERE, "build", "pcapdump")
 REMOTE_PCAPDUMP = "/opt/app/cisu/pcapdump"   # exec partition (/var/local is noexec)
 REMOTE_PCAP = "/var/local/stocknav.pcap"
-REMOTE_PID = "/var/local/stocknav.cap.pid"
+REMOTE_PID = "/var/local/stocknav.pcap.pid"   # pcapdump -d writes <out>.pid here
 TCPDUMP_CANDIDATES = ["tcpdump", "/usr/sbin/tcpdump", "/usr/bin/tcpdump", "/sbin/tcpdump", "/opt/app/usr/bin/tcpdump"]
 
 
@@ -62,9 +62,13 @@ def find_tcpdump(c):
 
 
 def ensure_pcapdump(c):
-    """Return the remote pcapdump path, uploading build/pcapdump to /opt/app/cisu if it is not already there."""
+    """Return the remote pcapdump path, uploading build/pcapdump to /opt/app/cisu if it is missing or broken
+    (e.g. a glibc build that aborts 'kernel too old' on the HU's old kernel -- we ship a musl static build)."""
     if run(c, "[ -x %s ] && echo yes" % REMOTE_PCAPDUMP).strip() == "yes":
-        return REMOTE_PCAPDUMP
+        chk = run(c, "%s 2>&1 | head -n 1" % REMOTE_PCAPDUMP)   # usage line carries the version token; broken -> 'kernel too old'
+        if "pcapdump-v2" in chk:
+            return REMOTE_PCAPDUMP
+        print("remote pcapdump stale/broken (%s); re-uploading" % chk.strip())
     if not os.path.exists(LOCAL_PCAPDUMP):
         print("MISSING local build/pcapdump -- build it first (arm ... -static pcapdump.c -o build/pcapdump)."); return ""
     run(c, "mkdir -p /opt/app/cisu")
@@ -115,11 +119,13 @@ def main():
                 kind, path = capture_tool(c)
                 if kind == "tcpdump":
                     print("=== 5 s peek (tcpdump) ===")
-                    print(asc(run(c, "timeout 5 %s -nn -i %s -c 40 host %s 2>&1 | tail -15" % (path, iface, CLUSTER), t=20)))
+                    print(asc(run(c, "{ timeout -t 5 %s -nn -i %s -c 40 host %s || timeout 5 %s -nn -i %s -c 40 host %s; } 2>&1 | tail -15"
+                                     % (path, iface, CLUSTER, path, iface, CLUSTER), t=20)))
                 elif kind == "pcapdump":
                     print("=== 5 s peek (pcapdump, max 50 pkts) ===")
-                    print(asc(run(c, "timeout 6 %s %s /var/local/peek.pcap %s 50 2>&1 | tail -3; rm -f /var/local/peek.pcap"
-                                     % (path, iface, CLUSTER), t=12)))
+                    print(asc(run(c, "{ timeout -t 6 %s %s /var/local/peek.pcap %s 50 || timeout 6 %s %s /var/local/peek.pcap %s 50; } 2>&1 | tail -3; "
+                                     "ls -l /var/local/peek.pcap 2>/dev/null; rm -f /var/local/peek.pcap"
+                                     % (path, iface, CLUSTER, path, iface, CLUSTER), t=14)))
             return
         if not iface:
             print("no interface on the cluster subnet found; run --probe."); return
@@ -127,17 +133,30 @@ def main():
             kind, path = capture_tool(c)
             if not kind:
                 print("no capture tool (no tcpdump and no pcapdump); build build/pcapdump first."); return
-            if kind == "tcpdump":
-                cmd = "%s -nn -i %s -s 0 -w %s host %s" % (path, iface, REMOTE_PCAP, CLUSTER)
+            # kill any previous capture, clear files (busybox sleep wants whole seconds)
+            run(c, "for p in $(ps w 2>/dev/null | grep '[p]capdump' | awk '{print $1}'); do kill $p 2>/dev/null; done; "
+                   "rm -f %s %s /var/local/stocknav.cap.out; sleep 1" % (REMOTE_PCAP, REMOTE_PID))
+            if kind == "pcapdump":
+                # pcapdump -d self-daemonizes and writes <out>.pid (the HU has no setsid; nohup alone does not survive).
+                run(c, "%s -d %s %s %s" % (path, iface, REMOTE_PCAP, CLUSTER))
             else:
-                cmd = "%s %s %s %s" % (path, iface, REMOTE_PCAP, CLUSTER)
-            pid = run(c, "nohup %s >/var/local/stocknav.cap.out 2>&1 & echo $! > %s; cat %s"
-                         % (cmd, REMOTE_PID, REMOTE_PID)).strip()
-            print("started %s pid=%s on %s capturing host %s -> %s" % (kind, pid, iface, CLUSTER, REMOTE_PCAP))
-            print("Now drive with the FACTORY nav guiding (no CarPlay route). Then: python stocknav_log.py --stop")
+                cmd = "%s -nn -i %s -s 0 -w %s host %s" % (path, iface, REMOTE_PCAP, CLUSTER)
+                run(c, "nohup %s </dev/null >/var/local/stocknav.cap.out 2>&1 & echo $! > %s" % (cmd, REMOTE_PID))
+            time.sleep(1)
+            pid = run(c, "cat %s 2>/dev/null" % REMOTE_PID).strip()
+            alive = run(c, "kill -0 %s 2>/dev/null && echo RUNNING || echo DEAD" % pid).strip() if pid.isdigit() else "DEAD"
+            size = run(c, "ls -l %s 2>/dev/null" % REMOTE_PCAP).strip()
+            print("started %s pid=%s [%s] on %s -> %s" % (kind, pid or "?", alive, iface, REMOTE_PCAP))
+            print("  file:", asc(size) or "(none yet)")
+            if "RUNNING" in alive:
+                print("Now drive with the FACTORY nav guiding (no CarPlay route). Then: python stocknav_log.py --stop before")
+            else:
+                print("WARNING: capture not running -- check /var/local/stocknav.cap.out")
             return
         if arg == "--stop":
-            run(c, "P=$(cat %s 2>/dev/null); [ -n \"$P\" ] && kill $P 2>/dev/null; sleep 1; sync" % REMOTE_PID)
+            run(c, "P=$(cat %s 2>/dev/null); [ -n \"$P\" ] && kill $P 2>/dev/null; "
+                   "for p in $(ps w 2>/dev/null | grep '[p]capdump' | awk '{print $1}'); do kill $p 2>/dev/null; done; "
+                   "sleep 1; sync" % REMOTE_PID)
             print("stopped;", asc(run(c, "ls -l %s 2>/dev/null; tail -1 /var/local/stocknav.cap.out 2>/dev/null" % REMOTE_PCAP).strip()))
             label = (sys.argv[2] + "-") if len(sys.argv) > 2 and sys.argv[2] else ""
             local = "stocknav-%s%s.pcap" % (label, time.strftime("%Y%m%d-%H%M%S"))

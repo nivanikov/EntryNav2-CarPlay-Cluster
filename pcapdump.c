@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t g_stop = 0;
@@ -32,19 +33,21 @@ static void put32(FILE* f, uint32_t v) { fwrite(&v, 4, 1, f); }
 static void put16(FILE* f, uint16_t v) { fwrite(&v, 2, 1, f); }
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        fprintf(stderr, "usage: %s <iface> <out.pcap> [host_ip] [max_packets]\n", argv[0]);
+    int daemonize = 0, ai = 1;
+    if (argc >= 2 && strcmp(argv[1], "-d") == 0) { daemonize = 1; ai = 2; }   /* self-detach (survive SSH close) */
+    if (argc - ai < 2) {
+        fprintf(stderr, "usage: %s [-d] <iface> <out.pcap> [host_ip] [max_packets]  (pcapdump-v2)\n", argv[0]);
         return 2;
     }
-    const char* iface = argv[1];
-    const char* outpath = argv[2];
+    const char* iface = argv[ai];
+    const char* outpath = argv[ai + 1];
     uint32_t filter = 0;  /* network-order IPv4; 0 = no filter */
-    if (argc >= 4 && argv[3][0]) {
+    if (argc - ai >= 3 && argv[ai + 2][0]) {
         struct in_addr a;
-        if (inet_aton(argv[3], &a)) filter = a.s_addr;
-        else { fprintf(stderr, "bad host_ip: %s\n", argv[3]); return 2; }
+        if (inet_aton(argv[ai + 2], &a)) filter = a.s_addr;
+        else { fprintf(stderr, "bad host_ip: %s\n", argv[ai + 2]); return 2; }
     }
-    long maxpkt = (argc >= 5) ? atol(argv[4]) : 0;
+    long maxpkt = (argc - ai >= 4) ? atol(argv[ai + 3]) : 0;
 
     unsigned ifindex = if_nametoindex(iface);
     if (!ifindex) { fprintf(stderr, "no interface '%s'\n", iface); return 1; }
@@ -64,6 +67,25 @@ int main(int argc, char** argv) {
     const uint32_t SNAP = 65535;
     put32(out, 0xa1b2c3d4u); put16(out, 2); put16(out, 4);
     put32(out, 0); put32(out, 0); put32(out, SNAP); put32(out, 1);
+
+    if (daemonize) {
+        /* Socket + pcap file are already open (setup errors were reported synchronously above). Detach so the capture
+         * survives the SSH session closing: the parent writes <out>.pid and exits, the child starts a new session. */
+        fflush(out);
+        pid_t pid = fork();
+        if (pid < 0) { perror("fork"); return 1; }
+        if (pid > 0) {
+            char pidf[1100];
+            snprintf(pidf, sizeof(pidf), "%s.pid", outpath);
+            FILE* pf = fopen(pidf, "w");
+            if (pf) { fprintf(pf, "%d\n", (int)pid); fclose(pf); }
+            _exit(0);
+        }
+        setsid();
+        if (freopen("/dev/null", "r", stdin) == NULL) { /* ignore */ }
+        if (freopen("/dev/null", "w", stdout) == NULL) { /* ignore */ }
+        if (freopen("/dev/null", "w", stderr) == NULL) { /* ignore */ }
+    }
 
     signal(SIGINT, on_stop);
     signal(SIGTERM, on_stop);
