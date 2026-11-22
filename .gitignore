@@ -27,6 +27,7 @@
 !/drivelog.py
 !/pcapdump.c
 !/pcapstat.py
+!/someip_decode.py
 !/RUNBOOK-aa-oncar.md
 
 # Belt and braces: never commit these even if inside an allowed folder.
